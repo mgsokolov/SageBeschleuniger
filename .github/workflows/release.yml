@@ -1,0 +1,56 @@
+name: Release portable build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-portable:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build portable folder + zip (always works, no symlink privilege required)
+        run: npm run build:portable-folder
+
+      - name: Build single-exe portable (best effort — requires symlink privilege)
+        id: single_exe
+        continue-on-error: true
+        run: npm run build:portable
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item "dist/SageBeschleuniger-*-portable.zip" -Destination release -ErrorAction SilentlyContinue
+          Copy-Item "dist/SageBeschleuniger-*-portable.exe" -Destination release -ErrorAction SilentlyContinue
+          Get-ChildItem release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SageBeschleuniger-portable
+          path: release/*
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}

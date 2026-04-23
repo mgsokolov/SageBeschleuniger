@@ -1,7 +1,7 @@
 {
   "name": "sagebeschleuniger",
-  "version": "0.1.0",
-  "description": "Windows desktop tool that lets you whip the Sage window to make it shake.",
+  "version": "0.2.0",
+  "description": "Windows portable tool that lets you whip any active application window to make it shake.",
   "license": "MIT",
   "main": "main.js",
   "bin": {
@@ -18,7 +18,7 @@
     "tray",
     "overlay",
     "windows",
-    "sage"
+    "portable"
   ],
   "repository": {
     "type": "git",
@@ -28,6 +28,9 @@
     "url": "https://github.com/mgsokolov/SageBeschleuniger/issues"
   },
   "homepage": "https://github.com/mgsokolov/SageBeschleuniger#readme",
+  "author": {
+    "name": "mgsokolov"
+  },
   "files": [
     "main.js",
     "preload.js",
@@ -39,10 +42,56 @@
   ],
   "scripts": {
     "start": "electron .",
-    "dev": "electron ."
+    "dev": "electron .",
+    "pack:dir": "electron-packager . SageBeschleuniger --platform=win32 --arch=x64 --out=dist --overwrite --prune=true --ignore=\"^/dist$\" --ignore=\"^/scripts$\" --ignore=\"^/\\.github$\" --ignore=\"^/\\.git$\" --ignore=\"^/\\.gitignore$\" --ignore=\"^/README\\.md$\" --ignore=\"^/LICENSE$\"",
+    "pack:zip": "node scripts/zip-portable.js",
+    "build:portable-folder": "npm run pack:dir && npm run pack:zip",
+    "build:portable": "electron-builder --win portable --x64"
   },
   "dependencies": {
-    "electron": "^33.0.0",
     "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^18.3.6",
+    "adm-zip": "^0.5.16",
+    "electron": "^33.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.mgsokolov.sagebeschleuniger",
+    "productName": "SageBeschleuniger",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "overlay.html",
+      "src/**/*",
+      "!**/*.md",
+      "!**/.git",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "SageBeschleuniger-${version}-portable.exe"
+    },
+    "portable": {
+      "artifactName": "SageBeschleuniger-${version}-portable.exe"
+    }
   }
 }

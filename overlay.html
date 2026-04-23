@@ -48,7 +48,7 @@
 <canvas id="c"></canvas>
 <div id="ui">
   <div class="pill">
-    <span id="ui-text">Searching for Sage window…</span>
+    <span id="ui-text">Looking for an active window…</span>
     <button id="ui-retry" type="button">Retry</button>
     <button id="ui-close" type="button">Close</button>
   </div>
@@ -529,7 +529,7 @@ window.bridge.onTargetUpdate((payload) => {
   } else {
     uiEl.classList.add('warn');
     uiEl.classList.add('visible');
-    uiText.textContent = 'No Sage window found — make sure Sage is running.';
+    uiText.textContent = 'No target window — bring an app to the foreground.';
   }
 });
 

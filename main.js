@@ -1,6 +1,6 @@
 // SageBeschleuniger main process.
 // Windows-only tray app that spawns a fullscreen whip overlay and shakes
-// the Sage window each time the whip connects with it.
+// whichever top-level window was most recently in the foreground.
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, dialog } =
   require('electron');
@@ -9,7 +9,6 @@ const path = require('path');
 const logger = require('./src/logger');
 
 if (process.platform !== 'win32') {
-  // Hard guard: refuse to run on anything but Windows.
   dialogOrConsole(
     'SageBeschleuniger is Windows-only (Windows Server 2019+ / Windows 10+).'
   );
@@ -17,10 +16,10 @@ if (process.platform !== 'win32') {
   process.exit(1);
 }
 
-let win32, sageLocator, shakeModule;
+let win32, targetTracker, shakeModule;
 try {
   win32 = require('./src/win32');
-  sageLocator = require('./src/sageLocator');
+  targetTracker = require('./src/targetTracker');
   shakeModule = require('./src/shake');
 } catch (err) {
   dialogOrConsole(
@@ -37,14 +36,9 @@ let tray = null;
 let overlay = null;
 let overlayReady = false;
 let spawnQueued = false;
-let targetTimer = null;
-let cachedTarget = null; // { hwnd, rect, title, exe }
-let cachedTargetAt = 0;
-const TARGET_CACHE_MS = 250;
+let pushTimer = null;
 
 // ── Tray icon (embedded PNG, no external file required) ─────────────────────
-// 32x32 solid-red rounded square PNG, base64 encoded.
-// Small enough to ship inline; avoids binary blob dependencies.
 const TRAY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA3UlEQVR4nO3aMQrCMBRA0b9F' +
   'LyA4e/8jdXfQUXARpWChWFKTl7zPn7SQPshbkqapKcvylvLcPY3HMv5i9rL6XOKxLm5y7UwA' +
@@ -62,6 +56,26 @@ function trayIconImage() {
     logger.warn('failed to decode embedded tray icon:', err.message);
   }
   return nativeImage.createEmpty();
+}
+
+// ── Coordinate conversion ───────────────────────────────────────────────────
+// GetWindowRect returns physical screen pixels; the overlay operates in DIPs.
+function screenRectToDip(rect) {
+  if (!rect) return null;
+  try {
+    const tl = screen.screenToDipPoint({ x: rect.left, y: rect.top });
+    const br = screen.screenToDipPoint({ x: rect.right, y: rect.bottom });
+    return {
+      left: Math.round(tl.x),
+      top: Math.round(tl.y),
+      right: Math.round(br.x),
+      bottom: Math.round(br.y),
+      width: Math.round(br.x - tl.x),
+      height: Math.round(br.y - tl.y),
+    };
+  } catch {
+    return rect;
+  }
 }
 
 // ── Overlay ─────────────────────────────────────────────────────────────────
@@ -101,18 +115,22 @@ function createOverlay() {
     overlay = null;
     overlayReady = false;
     spawnQueued = false;
-    stopTargetTimer();
+    stopPushTimer();
   });
 }
 
 function toggleOverlay() {
+  // Lock in the user's actual foreground app BEFORE showing the overlay,
+  // so the tray click itself cannot race us.
+  targetTracker.capture();
+
   if (overlay && overlay.isVisible()) {
     overlay.webContents.send('overlay:drop-whip');
     return;
   }
   if (!overlay) createOverlay();
   overlay.show();
-  startTargetTimer();
+  startPushTimer();
   if (overlayReady) {
     overlay.webContents.send('overlay:spawn-whip');
     pushTargetUpdate(true);
@@ -122,52 +140,9 @@ function toggleOverlay() {
 }
 
 // ── Target polling ──────────────────────────────────────────────────────────
-function resolveTarget(force = false) {
-  const now = Date.now();
-  if (!force && cachedTarget && now - cachedTargetAt < TARGET_CACHE_MS) {
-    return cachedTarget;
-  }
-  const found = sageLocator.findSageWindow();
-  if (!found) {
-    cachedTarget = null;
-    cachedTargetAt = now;
-    return null;
-  }
-  const rect = win32.getWindowRect(found.hwnd) || found.rect;
-  cachedTarget = {
-    hwnd: found.hwnd,
-    rect,
-    title: found.title,
-    exe: found.exe,
-  };
-  cachedTargetAt = now;
-  return cachedTarget;
-}
-
-function screenRectToDip(rect) {
-  if (!rect) return null;
-  try {
-    const topLeft = screen.screenToDipPoint({ x: rect.left, y: rect.top });
-    const bottomRight = screen.screenToDipPoint({
-      x: rect.right,
-      y: rect.bottom,
-    });
-    return {
-      left: Math.round(topLeft.x),
-      top: Math.round(topLeft.y),
-      right: Math.round(bottomRight.x),
-      bottom: Math.round(bottomRight.y),
-      width: Math.round(bottomRight.x - topLeft.x),
-      height: Math.round(bottomRight.y - topLeft.y),
-    };
-  } catch {
-    return rect;
-  }
-}
-
 function pushTargetUpdate(force = false) {
   if (!overlay || overlay.isDestroyed() || !overlayReady) return;
-  const target = resolveTarget(force);
+  const target = targetTracker.current();
   const payload = target
     ? {
         found: true,
@@ -177,24 +152,27 @@ function pushTargetUpdate(force = false) {
       }
     : { found: false };
   overlay.webContents.send('sage:target-update', payload);
+  if (force) {
+    // no-op; included for symmetry with the previous API
+  }
 }
 
-function startTargetTimer() {
-  stopTargetTimer();
-  targetTimer = setInterval(() => pushTargetUpdate(false), 200);
+function startPushTimer() {
+  stopPushTimer();
+  pushTimer = setInterval(() => pushTargetUpdate(false), 200);
 }
 
-function stopTargetTimer() {
-  if (targetTimer) {
-    clearInterval(targetTimer);
-    targetTimer = null;
+function stopPushTimer() {
+  if (pushTimer) {
+    clearInterval(pushTimer);
+    pushTimer = null;
   }
 }
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
 ipcMain.on('sage:whip-hit', async (_ev, point) => {
   try {
-    const target = resolveTarget(true);
+    const target = targetTracker.current();
     if (!target || !target.hwnd) {
       if (overlay && !overlay.isDestroyed()) {
         overlay.webContents.send('sage:hit-feedback', { ok: false, point });
@@ -212,43 +190,41 @@ ipcMain.on('sage:whip-hit', async (_ev, point) => {
 
 ipcMain.on('overlay:hide', () => {
   if (overlay && !overlay.isDestroyed()) overlay.hide();
-  stopTargetTimer();
+  stopPushTimer();
 });
 
 ipcMain.on('sage:refresh-target', () => {
+  targetTracker.capture();
   pushTargetUpdate(true);
 });
 
 // ── Tray menu ───────────────────────────────────────────────────────────────
 function buildContextMenu() {
   return Menu.buildFromTemplate([
+    { label: 'Open Whip', click: () => toggleOverlay() },
     {
-      label: 'Open Whip',
-      click: () => toggleOverlay(),
-    },
-    {
-      label: 'Locate Sage Window',
+      label: 'Identify Current Target',
       click: () => {
-        const target = resolveTarget(true);
+        const target = targetTracker.capture() || targetTracker.current();
         if (target) {
           dialog.showMessageBox({
             type: 'info',
             title: 'SageBeschleuniger',
-            message: 'Sage window detected.',
+            message: 'Current whip target',
             detail:
               'Title: ' +
               (target.title || '(no title)') +
               '\nProcess: ' +
-              (target.exe ? path.basename(target.exe) : '(unknown)'),
+              (target.exe || '(unknown)'),
           });
         } else {
           dialog.showMessageBox({
             type: 'warning',
             title: 'SageBeschleuniger',
-            message: 'No Sage window found.',
+            message: 'No target window found.',
             detail:
-              'Make sure a Sage application is running with a visible window.\n' +
-              'Matching is based on window title or process name containing "sage".',
+              'Bring the application you want to whip to the foreground, ' +
+              'then reopen this menu.',
           });
         }
       },
@@ -267,15 +243,17 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
-  tray.setToolTip('SageBeschleuniger - click to whip the Sage window');
+  tray.setToolTip('SageBeschleuniger - whip the active window');
   tray.setContextMenu(buildContextMenu());
   tray.on('click', toggleOverlay);
+  targetTracker.start();
 });
 
-app.on('window-all-closed', (e) => e.preventDefault()); // stay alive in tray
+app.on('window-all-closed', (e) => e.preventDefault());
 
 app.on('before-quit', () => {
-  stopTargetTimer();
+  stopPushTimer();
+  targetTracker.stop();
   if (overlay && !overlay.isDestroyed()) {
     try {
       overlay.destroy();

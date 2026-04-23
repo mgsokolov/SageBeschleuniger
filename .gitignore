@@ -4,6 +4,8 @@ yarn-error.log
 *.log
 dist/
 out/
+build/output/
+release/
 .DS_Store
 Thumbs.db
 .vscode/

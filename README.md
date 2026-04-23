@@ -1,19 +1,20 @@
 # SageBeschleuniger
 
 SageBeschleuniger is a Windows-only desktop tool that lets you visibly whip the
-**Sage** application window. Each successful hit plays a whip-crack sound and
-makes the Sage window shake briefly without stealing focus, moving it
+**currently active application window**. Each successful hit plays a whip-crack
+sound and makes that window shake briefly without stealing focus, moving it
 permanently, or changing its size.
 
 > Inspired by the interaction idea of [OpenWhip](https://github.com/GitFrog1111/OpenWhip),
-> rebuilt as a standalone Windows tool whose target is the Sage window instead
-> of a keyboard macro.
+> rebuilt as a standalone Windows tool whose target is whichever top-level
+> window you were just using.
 
 ## What it does
 
 - Runs as a tray icon.
+- Tracks the most recently active top-level window (foreground).
 - Clicking the tray icon spawns a transparent full-screen whip overlay.
-- Swinging the whip fast triggers a crack; if the whip tip lands on the Sage
+- Swinging the whip fast triggers a crack; if the whip tip lands on the target
   window, the window shakes horizontally for ~130 ms and returns to its exact
   original position.
 - Closing the whip (mouse click or Escape) hides the overlay; the app stays in
@@ -21,127 +22,146 @@ permanently, or changing its size.
 
 ## Platform support
 
-**Windows only. Windows Server 2019 and newer / Windows 10 and newer.**
+**Windows only. Windows Server 2019+ and Windows 10/11.**
 
-macOS and Linux are explicitly **not supported**. The CLI refuses to start on
+macOS and Linux are explicitly **not supported**. The app refuses to start on
 any non-Windows platform.
 
-## Prerequisites
+## Run it (portable, no install)
 
-- Windows Server 2019+ or Windows 10/11.
-- Node.js 18 or newer: <https://nodejs.org/>
-- An x64 architecture (matches the prebuilt Electron and `koffi` binaries).
-- No administrator rights required.
+The project is designed to be used as a **portable application** — just
+download and run. No installer, no admin rights, no registry changes, no
+persistence outside the exe.
 
-## Install
+### Get the portable exe
 
-### Option A — from the GitHub repository (recommended)
+1. Go to the [Releases page](https://github.com/mgsokolov/SageBeschleuniger/releases).
+2. Download `SageBeschleuniger-<version>-portable.exe`.
+3. Double-click the exe. A tray icon appears.
 
-```powershell
-npm install -g github:mgsokolov/SageBeschleuniger
-```
+If no release is published yet, build it yourself (see below). Release builds
+are produced automatically by GitHub Actions when a `v*` tag is pushed.
 
-### Option B — from a local clone
+### Build the portable distribution yourself
+
+Requires Node.js 18+ and a Windows machine.
 
 ```powershell
 git clone https://github.com/mgsokolov/SageBeschleuniger.git
 cd SageBeschleuniger
 npm install
-npm install -g .
 ```
 
-Both options expose the `sagebeschleuniger` command globally.
+Two local build options are provided:
 
-## Start
+**Portable folder + zip (works for every Windows user, no admin needed):**
 
 ```powershell
-sagebeschleuniger
+npm run build:portable-folder
 ```
 
-A tray icon appears. Left-click the tray icon to open the whip. Right-click for
-the menu (Open Whip / Locate Sage Window / Quit).
+Produces `dist/SageBeschleuniger-<version>-portable.zip`. Unzip anywhere,
+then run `SageBeschleuniger\SageBeschleuniger.exe`.
 
-You can also run it once without a global install:
+**Single portable .exe (requires Windows Developer Mode or elevated shell):**
 
 ```powershell
-npx github:mgsokolov/SageBeschleuniger
+npm run build:portable
 ```
 
-Or, inside a local clone:
+Produces `dist/SageBeschleuniger-<version>-portable.exe`. Copy anywhere and
+run. This target uses `electron-builder`, which needs permission to create
+symbolic links during its toolchain extraction — either enable *Developer
+Mode* under *Settings → Privacy & security → For developers*, or run the
+command in an elevated (Administrator) shell. The CI release pipeline
+builds this target automatically on `windows-latest` runners, so most users
+do not need to build it locally.
+
+### Run from source without packaging
 
 ```powershell
+git clone https://github.com/mgsokolov/SageBeschleuniger.git
+cd SageBeschleuniger
+npm install
 npm start
 ```
 
-## How the Sage window is detected
+## Using it
 
-The locator enumerates all top-level Windows and keeps candidates that match
-either of:
+1. Click the app that you want to whip, so it is the active window.
+2. Left-click the SageBeschleuniger tray icon.
+3. The whip spawns at your cursor. Swing fast toward the target window.
+4. On a hit, the target window shakes briefly.
+5. Click (or press Escape) to drop the whip and hide the overlay.
 
-- window **title** contains `sage` (case-insensitive), or
-- the owning **process image name** contains `sage` (e.g. `Sage100.exe`,
-  `Sage.exe`, `SageCRM.exe`).
+Tray menu:
 
-It then filters the list:
+- **Open Whip** — same as left-clicking the tray icon.
+- **Identify Current Target** — shows the title and process name of the
+  current target, useful for confirming which window will be hit.
+- **Quit** — exits the app.
 
-- drops invisible, minimized, owned, and tiny windows,
-- drops known shell/system classes and SageBeschleuniger's own windows.
+## How the target window is chosen
 
-Ranking among surviving candidates:
+The app polls the Windows foreground window every 200 ms. The "target" is the
+most recently seen top-level foreground window that:
 
-1. the currently focused (foreground) window wins,
-2. otherwise the candidate that matches both title *and* process name wins,
-3. otherwise the candidate with the largest screen area wins.
+- is visible and not minimized,
+- is larger than 80×60 pixels,
+- is not one of the system shell windows (`Progman`, `WorkerW`,
+  `Shell_TrayWnd`, `Shell_SecondaryTrayWnd`, `Windows.UI.Core.CoreWindow`,
+  `ApplicationFrameWindow`, `IME`, `MSCTFIME UI`, `Default IME`),
+- does not belong to SageBeschleuniger itself.
 
-If no candidate matches, the overlay shows "No Sage window found" with a
-**Retry** button. The tray menu entry **Locate Sage Window** reports which
-window was found.
+When you open the overlay, the target is locked in and a red dashed rectangle
+marks it so you can see where to aim. If the target disappears (closed or
+minimized), the app falls back to whatever is in the foreground now.
 
-Set `SAGEBESCHLEUNIGER_DEBUG=1` to get verbose discovery logs on stdout.
+Set `SAGEBESCHLEUNIGER_DEBUG=1` for verbose discovery logs on stdout (visible
+when running `npm start`, not when running the portable exe).
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| Tray icon does not appear | Some Windows Server 2019 core installs hide the notification area. Check that the Explorer shell is installed, or open the app via its taskbar fallback. |
-| "No Sage window found" banner | Make sure Sage is running and has a visible main window. Restore it if minimized. Click **Retry** or use tray menu → *Locate Sage Window*. |
-| Whip cracks but window does not shake | Sage may be running elevated while you run SageBeschleuniger non-elevated; Windows blocks `SetWindowPos` across integrity levels. Start both programs at the same integrity level. |
-| Whip tip does not register on Sage | The overlay uses the primary display. Move Sage to the primary display, or click Retry after dragging it. |
+| Tray icon does not appear | On Windows Server Core there is no notification area. Install the Desktop Experience, or run a non-core SKU. |
+| "No target window" banner | Click once on the window you want to whip so it becomes foreground, then open the whip again. Use tray menu → *Identify Current Target* to confirm. |
+| Whip cracks but window does not shake | The target may be running elevated while you run SageBeschleuniger non-elevated; Windows blocks `SetWindowPos` across integrity levels. Start both programs at the same integrity level. |
+| Whip tip does not register | The overlay uses the primary display. Move the target window to the primary display. |
 | No whip-crack sound | Output device may be muted. Sound is synthesized via Web Audio; no external mp3 is required. |
 
 ## Known limits on Windows Server 2019+
 
 - The overlay covers the **primary display** only. On multi-monitor setups,
-  move Sage to the primary display before whipping.
+  move the target to the primary display before whipping.
 - Windows Server 2019 Core / headless installs without a desktop shell cannot
   show a system tray and therefore are not supported.
-- High-DPI Sage windows running in a mixed-DPI session may report slightly
-  offset rectangles; the shake still works but the target outline may be a few
-  pixels off. This is a limitation of mixed-DPI Win32 coordinate reporting.
+- High-DPI targets running in a mixed-DPI session may report slightly
+  offset rectangles; the shake still works but the outline may be a few
+  pixels off.
 
 ## Uninstall
 
-```powershell
-npm uninstall -g sagebeschleuniger
-```
-
-No files are written outside `node_modules`. No scheduled tasks, services,
-registry keys, or autostart entries are created.
+Delete the exe. That is it. The portable build does not write to the registry,
+does not create a Start Menu entry, does not create a scheduled task, and
+does not leave behind any files outside Windows' standard per-user temp
+unpack directory (which Windows cleans up on its own).
 
 ## Project layout
 
 ```
 SageBeschleuniger/
-├── bin/sagebeschleuniger.js   # CLI launcher → spawns Electron
-├── main.js                    # Tray + overlay lifecycle + IPC
-├── preload.js                 # Safe renderer bridge
-├── overlay.html               # Whip physics, rendering, hit detection
+├── bin/sagebeschleuniger.js     # Optional CLI launcher (for "from source" usage)
+├── main.js                       # Tray + overlay lifecycle + IPC
+├── preload.js                    # Safe renderer bridge
+├── overlay.html                  # Whip physics, rendering, hit detection
 ├── src/
-│   ├── win32.js               # koffi bindings: EnumWindows, SetWindowPos, …
-│   ├── sageLocator.js         # Window discovery and ranking
-│   ├── shake.js               # Non-activating, rate-limited shake animation
-│   └── logger.js              # Stdout logging (debug gated by env var)
-├── package.json
+│   ├── win32.js                  # koffi bindings: EnumWindows, SetWindowPos, …
+│   ├── targetTracker.js          # Foreground-window tracker
+│   ├── shake.js                  # Non-activating, rate-limited shake animation
+│   └── logger.js                 # Stdout logging (debug gated by env var)
+├── .github/workflows/release.yml # CI: build portable exe on "v*" tag push
+├── package.json                  # electron-builder config included
 ├── README.md
 └── LICENSE
 ```
@@ -150,12 +170,29 @@ SageBeschleuniger/
 
 - Pure user-space: no driver, no DLL injection, no hooks, no admin.
 - Window movement uses `SetWindowPos` with `SWP_NOSIZE | SWP_NOZORDER |
-  SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS` so the Sage window never gets resized,
-  re-z-ordered, or activated.
-- Each shake reads the original position first and guarantees it is restored in
-  a `finally` block, even on error.
+  SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS` so the target window never gets
+  resized, re-z-ordered, or activated.
+- Each shake reads the original position first and guarantees it is restored
+  in a `finally` block, even on error.
 - Shakes are serialized per-window with a concurrency guard and rate-limited
   to avoid jitter under rapid whip-spamming.
+- The overlay uses `focusable: false`, so opening the whip does not steal
+  focus from the target window.
+- Portable packaging: single `.exe` produced by `electron-builder` with
+  `target: portable`. All files are extracted to a per-user temp directory at
+  launch and cleaned up on exit.
+
+## Publishing a release
+
+Maintainer-only:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+GitHub Actions builds the portable exe on `windows-latest` and attaches it to
+the GitHub Release automatically.
 
 ## License
 
