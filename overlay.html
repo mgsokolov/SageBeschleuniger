@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>SageBeschleuniger Overlay</title>
+<style>
+  * { margin: 0; padding: 0; cursor: none; }
+  html, body { overflow: hidden; background: transparent; width: 100%; height: 100%; user-select: none; }
+  canvas { display: block; position: absolute; inset: 0; }
+  #ui {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 13px;
+    color: #fff;
+    pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+    display: none;
+  }
+  #ui.visible { display: block; }
+  #ui .pill {
+    background: rgba(20, 20, 22, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 8px 14px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    pointer-events: auto;
+    cursor: default;
+  }
+  #ui.warn .pill { border-color: rgba(255, 120, 100, 0.6); }
+  #ui button {
+    font: inherit;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 3px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  #ui button:hover { background: rgba(255, 255, 255, 0.22); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="pill">
+    <span id="ui-text">Searching for Sage window…</span>
+    <button id="ui-retry" type="button">Retry</button>
+    <button id="ui-close" type="button">Close</button>
+  </div>
+</div>
+<script>
+// ── Whip physics (adapted from OpenWhip) ───────────────────────────────────
+const P = {
+  segments: 28,
+  segmentLength: 25,
+  taper: 0.6,
+  gravity: 1.2,
+  dropGravity: 0.95,
+  damping: 0.96,
+  constraintIters: 20,
+  maxStretchRatio: 1.2,
+  baseTargetAngle: -1.12,
+  handleAimByMouseX: 0.4,
+  handleAimByMouseY: 0.2,
+  handleAimClamp: 2.0,
+  handleSpring: 0.7,
+  handleAngularDamping: 0.078,
+  basePoseSegments: 2,
+  basePoseStiffStart: 0.9,
+  basePoseStiffEnd: 0.8,
+  handleMaxBendDeg: 16,
+  tipMaxBendDeg: 130,
+  bendRigidityStart: 0.8,
+  bendRigidityEnd: 0.12,
+  wallBounce: 0.42,
+  wallFriction: 0.86,
+  crackSpeed: 340,
+  crackCooldownMs: 200,
+  firstCrackGraceMs: 350,
+  lineWidthHandle: 7,
+  lineWidthTip: 5,
+  outlineWidth: 3,
+  handleExtraWidth: 5,
+  handleThickSegments: 2,
+  bgAlpha: 0.011,
+  arcWidth: 260,
+  arcHeight: 185,
+};
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const uiEl = document.getElementById('ui');
+const uiText = document.getElementById('ui-text');
+const uiRetry = document.getElementById('ui-retry');
+const uiClose = document.getElementById('ui-close');
+
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let mouseX = 0, mouseY = 0;
+let prevMouseX = 0, prevMouseY = 0;
+let whip = null;
+let dropping = false;
+let lastCrackTime = 0;
+let whipSpawnTime = 0;
+let handleAngle = P.baseTargetAngle;
+let handleAngVel = 0;
+
+let target = { found: false, rect: null, title: '', exe: '' };
+const hitFlashes = []; // { x, y, t, color }
+
+document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+document.addEventListener('mousedown', () => {
+  if (whip && !dropping) dropping = true;
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (whip && !dropping) dropping = true;
+  }
+});
+
+uiRetry.addEventListener('click', () => window.bridge.requestTargetRefresh());
+uiClose.addEventListener('click', () => {
+  if (whip && !dropping) dropping = true;
+  else window.bridge.hideOverlay();
+});
+
+// ── Whip creation ─────────────────────────────────────────────────────────
+function spawnWhip(mx, my) {
+  dropping = false;
+  lastCrackTime = 0;
+  whipSpawnTime = Date.now();
+  const pts = [];
+  for (let i = 0; i < P.segments; i++) {
+    const t = i / (P.segments - 1);
+    const x = mx + t * P.arcWidth;
+    const y = my - Math.sin(t * Math.PI * 0.75) * P.arcHeight;
+    pts.push({ x, y, px: x, py: y });
+  }
+  return pts;
+}
+
+function segLen(i) {
+  const t = i / (P.segments - 1);
+  return P.segmentLength * (1 - t * (1 - P.taper));
+}
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function catmullPoint(pts, i) {
+  const n = pts.length;
+  if (n === 0) return { x: 0, y: 0 };
+  if (i < 0) {
+    if (n >= 2) return { x: 2 * pts[0].x - pts[1].x, y: 2 * pts[0].y - pts[1].y };
+    return { x: pts[0].x, y: pts[0].y };
+  }
+  if (i >= n) {
+    if (n >= 2) {
+      const a = pts[n - 2], b = pts[n - 1];
+      return { x: 2 * b.x - a.x, y: 2 * b.y - a.y };
+    }
+    return { x: pts[n - 1].x, y: pts[n - 1].y };
+  }
+  return pts[i];
+}
+
+function whipSegmentBezier(pts, i) {
+  const p0 = catmullPoint(pts, i - 1);
+  const p1 = pts[i];
+  const p2 = pts[i + 1];
+  const p3 = catmullPoint(pts, i + 2);
+  return {
+    cp1x: p1.x + (p2.x - p0.x) / 6,
+    cp1y: p1.y + (p2.y - p0.y) / 6,
+    cp2x: p2.x - (p3.x - p1.x) / 6,
+    cp2y: p2.y - (p3.y - p1.y) / 6,
+    x2: p2.x,
+    y2: p2.y,
+  };
+}
+const wrapPi = a => {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+};
+
+// ── Synthesized whip-crack sound (no external file) ───────────────────────
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) {
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  return audioCtx;
+}
+
+function playCrackSound() {
+  const actx = getAudio();
+  if (!actx) return;
+  const now = actx.currentTime;
+
+  // Short noise burst through a band-pass filter -> whip crack.
+  const duration = 0.18;
+  const buffer = actx.createBuffer(1, actx.sampleRate * duration, actx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    const t = i / data.length;
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.2);
+  }
+  const src = actx.createBufferSource();
+  src.buffer = buffer;
+
+  const bp = actx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(1800, now);
+  bp.frequency.exponentialRampToValueAtTime(4200, now + 0.05);
+  bp.Q.value = 1.8;
+
+  const gain = actx.createGain();
+  gain.gain.setValueAtTime(0.0, now);
+  gain.gain.linearRampToValueAtTime(0.8, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+  src.connect(bp).connect(gain).connect(actx.destination);
+  src.start(now);
+  src.stop(now + duration);
+}
+
+// ── Aim / pose / bend ─────────────────────────────────────────────────────
+function updateHandleAim() {
+  if (dropping) return;
+  const mvx = mouseX - prevMouseX;
+  const mvy = mouseY - prevMouseY;
+  const delta = clamp(
+    mvx * P.handleAimByMouseX + mvy * P.handleAimByMouseY,
+    -P.handleAimClamp,
+    P.handleAimClamp
+  );
+  const t = P.baseTargetAngle + delta;
+  const err = wrapPi(t - handleAngle);
+  handleAngVel += err * P.handleSpring;
+  handleAngVel *= P.handleAngularDamping;
+  handleAngle = wrapPi(handleAngle + handleAngVel);
+}
+
+function applyBasePose() {
+  if (!whip || dropping) return;
+  const dx = Math.cos(handleAngle);
+  const dy = Math.sin(handleAngle);
+  const guided = Math.min(P.basePoseSegments, whip.length - 1);
+  for (let i = 1; i <= guided; i++) {
+    const t = (i - 1) / Math.max(guided - 1, 1);
+    const stiff = lerp(P.basePoseStiffStart, P.basePoseStiffEnd, t);
+    const prev = whip[i - 1];
+    const p = whip[i];
+    const tlen = segLen(i - 1);
+    const tx = prev.x + dx * tlen;
+    const ty = prev.y + dy * tlen;
+    p.x = lerp(p.x, tx, stiff);
+    p.y = lerp(p.y, ty, stiff);
+  }
+}
+
+function applyBendLimits() {
+  if (!whip || whip.length < 3) return;
+  for (let i = 1; i < whip.length - 1; i++) {
+    const a = whip[i - 1];
+    const b = whip[i];
+    const c = whip[i + 1];
+    const v1x = a.x - b.x;
+    const v1y = a.y - b.y;
+    const v2x = c.x - b.x;
+    const v2y = c.y - b.y;
+    const l1 = Math.hypot(v1x, v1y) || 0.0001;
+    const l2 = Math.hypot(v2x, v2y) || 0.0001;
+    const n1x = v1x / l1, n1y = v1y / l1;
+    const n2x = v2x / l2, n2y = v2y / l2;
+    const dot = clamp(n1x * n2x + n1y * n2y, -1, 1);
+    const angle = Math.acos(dot);
+    const t = i / (whip.length - 2);
+    const maxBend = lerp(P.handleMaxBendDeg, P.tipMaxBendDeg, t) * Math.PI / 180;
+    const bend = Math.PI - angle;
+    if (bend <= maxBend) continue;
+    const cross = n1x * n2y - n1y * n2x;
+    const sign = cross >= 0 ? 1 : -1;
+    const targetAngle = Math.PI - maxBend;
+    const targetA = Math.atan2(n1y, n1x) + sign * targetAngle;
+    const tx = b.x + Math.cos(targetA) * l2;
+    const ty = b.y + Math.sin(targetA) * l2;
+    const rigidity = lerp(P.bendRigidityStart, P.bendRigidityEnd, t);
+    c.x = lerp(c.x, tx, rigidity);
+    c.y = lerp(c.y, ty, rigidity);
+  }
+}
+
+function capSegmentStretch() {
+  if (!whip || whip.length < 2) return;
+  for (let i = 0; i < whip.length - 1; i++) {
+    const a = whip[i];
+    const b = whip[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy) || 0.0001;
+    const maxLen = segLen(i) * P.maxStretchRatio;
+    if (dist <= maxLen) continue;
+    const k = maxLen / dist;
+    b.x = a.x + dx * k;
+    b.y = a.y + dy * k;
+  }
+}
+
+function applyWallCollisions() {
+  if (!whip || dropping) return;
+  for (let i = 1; i < whip.length; i++) {
+    const p = whip[i];
+    let vx = p.x - p.px;
+    let vy = p.y - p.py;
+    let hit = false;
+    if (p.x < 0) { p.x = 0; if (vx < 0) vx = -vx * P.wallBounce; vy *= P.wallFriction; hit = true; }
+    else if (p.x > W) { p.x = W; if (vx > 0) vx = -vx * P.wallBounce; vy *= P.wallFriction; hit = true; }
+    if (p.y < 0) { p.y = 0; if (vy < 0) vy = -vy * P.wallBounce; vx *= P.wallFriction; hit = true; }
+    else if (p.y > H) { p.y = H; if (vy > 0) vy = -vy * P.wallBounce; vx *= P.wallFriction; hit = true; }
+    if (hit) { p.px = p.x - vx; p.py = p.y - vy; }
+  }
+}
+
+// ── Hit detection ─────────────────────────────────────────────────────────
+function tipInsideTarget() {
+  if (!target.found || !target.rect || !whip) return false;
+  const tip = whip[whip.length - 1];
+  const r = target.rect;
+  return tip.x >= r.left && tip.x <= r.right && tip.y >= r.top && tip.y <= r.bottom;
+}
+
+// ── Physics step ──────────────────────────────────────────────────────────
+function update() {
+  if (!whip) return;
+
+  const g = dropping ? P.dropGravity : P.gravity;
+  updateHandleAim();
+
+  const start = dropping ? 0 : 1;
+  for (let i = start; i < whip.length; i++) {
+    const p = whip[i];
+    const vx = (p.x - p.px) * P.damping;
+    const vy = (p.y - p.py) * P.damping;
+    p.px = p.x;
+    p.py = p.y;
+    p.x += vx;
+    p.y += vy + g;
+  }
+
+  if (!dropping) {
+    whip[0].x = mouseX;
+    whip[0].y = mouseY;
+    whip[0].px = mouseX;
+    whip[0].py = mouseY;
+  }
+
+  capSegmentStretch();
+  applyWallCollisions();
+  applyBasePose();
+
+  for (let iter = 0; iter < P.constraintIters; iter++) {
+    for (let i = 0; i < whip.length - 1; i++) {
+      const a = whip[i], b = whip[i + 1];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      const tlen = segLen(i);
+      const diff = (dist - tlen) / dist * 0.5;
+      const ox = dx * diff, oy = dy * diff;
+      if (i === 0 && !dropping) {
+        b.x -= ox * 2;
+        b.y -= oy * 2;
+      } else {
+        a.x += ox; a.y += oy;
+        b.x -= ox; b.y -= oy;
+      }
+    }
+    applyBendLimits();
+    if (!dropping) applyBasePose();
+    capSegmentStretch();
+    applyWallCollisions();
+  }
+
+  const tip = whip[whip.length - 1];
+  const tipVel = Math.hypot(tip.x - tip.px, tip.y - tip.py);
+
+  if (!dropping && tipVel > P.crackSpeed) {
+    const now = Date.now();
+    if (now - whipSpawnTime >= P.firstCrackGraceMs && now - lastCrackTime > P.crackCooldownMs) {
+      lastCrackTime = now;
+      playCrackSound();
+      if (tipInsideTarget()) {
+        window.bridge.whipHit({ x: tip.x, y: tip.y });
+      } else {
+        // Not on target: still show a subtle miss flash, no shake.
+        hitFlashes.push({ x: tip.x, y: tip.y, t: now, ok: false });
+      }
+    }
+  }
+
+  if (dropping && whip.every(p => p.y > H + 60)) {
+    whip = null;
+    dropping = false;
+    window.bridge.hideOverlay();
+  }
+  prevMouseX = mouseX;
+  prevMouseY = mouseY;
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+function drawTargetOutline() {
+  if (!target.found || !target.rect) return;
+  const r = target.rect;
+  ctx.save();
+  ctx.setLineDash([6, 6]);
+  ctx.strokeStyle = 'rgba(255, 90, 90, 0.55)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(r.left + 1, r.top + 1, Math.max(0, r.width - 2), Math.max(0, r.height - 2));
+  ctx.restore();
+}
+
+function drawHitFlashes() {
+  const now = Date.now();
+  for (let i = hitFlashes.length - 1; i >= 0; i--) {
+    const f = hitFlashes[i];
+    const age = now - f.t;
+    if (age > 450) { hitFlashes.splice(i, 1); continue; }
+    const t = age / 450;
+    const radius = 8 + t * 60;
+    const alpha = (1 - t) * 0.9;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, radius, 0, Math.PI * 2);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = f.ok
+      ? `rgba(255, 220, 90, ${alpha})`
+      : `rgba(255, 255, 255, ${alpha * 0.5})`;
+    ctx.stroke();
+  }
+}
+
+function drawWhip() {
+  if (!whip) return;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#fff';
+  if (whip.length >= 2) {
+    ctx.beginPath();
+    ctx.moveTo(whip[0].x, whip[0].y);
+    for (let i = 0; i < whip.length - 1; i++) {
+      const { cp1x, cp1y, cp2x, cp2y, x2, y2 } = whipSegmentBezier(whip, i);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+    }
+    ctx.lineWidth = P.lineWidthTip + P.outlineWidth * 2;
+    ctx.stroke();
+
+    const thickLinks = Math.min(P.handleThickSegments, whip.length - 1);
+    if (thickLinks > 0 && P.handleExtraWidth > 0) {
+      ctx.beginPath();
+      ctx.moveTo(whip[0].x, whip[0].y);
+      for (let i = 0; i < thickLinks; i++) {
+        const { cp1x, cp1y, cp2x, cp2y, x2, y2 } = whipSegmentBezier(whip, i);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+      }
+      ctx.lineWidth = P.lineWidthHandle + P.handleExtraWidth + P.outlineWidth * 2;
+      ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = '#111';
+  for (let i = 0; i < whip.length - 1; i++) {
+    const t = i / Math.max(1, whip.length - 2);
+    const extra = i < P.handleThickSegments ? P.handleExtraWidth : 0;
+    ctx.lineWidth = lerp(P.lineWidthHandle, P.lineWidthTip, t) + extra;
+    const { cp1x, cp1y, cp2x, cp2y, x2, y2 } = whipSegmentBezier(whip, i);
+    ctx.beginPath();
+    ctx.moveTo(whip[i].x, whip[i].y);
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+    ctx.stroke();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = `rgba(0,0,0,${P.bgAlpha})`;
+  ctx.fillRect(0, 0, W, H);
+  drawTargetOutline();
+  drawHitFlashes();
+  drawWhip();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+// ── IPC from main ─────────────────────────────────────────────────────────
+window.bridge.onSpawnWhip(() => {
+  whip = spawnWhip(mouseX || W / 2, mouseY || H / 2);
+  dropping = false;
+  prevMouseX = mouseX;
+  prevMouseY = mouseY;
+  handleAngle = P.baseTargetAngle;
+  handleAngVel = 0;
+});
+
+window.bridge.onDropWhip(() => {
+  if (whip && !dropping) dropping = true;
+});
+
+window.bridge.onTargetUpdate((payload) => {
+  target = payload || { found: false };
+  if (payload && payload.found) {
+    uiEl.classList.remove('warn');
+    uiEl.classList.remove('visible');
+  } else {
+    uiEl.classList.add('warn');
+    uiEl.classList.add('visible');
+    uiText.textContent = 'No Sage window found — make sure Sage is running.';
+  }
+});
+
+window.bridge.onHitFeedback((payload) => {
+  if (!payload) return;
+  hitFlashes.push({
+    x: payload.point ? payload.point.x : W / 2,
+    y: payload.point ? payload.point.y : H / 2,
+    t: Date.now(),
+    ok: !!payload.ok,
+  });
+});
+</script>
+</body>
+</html>

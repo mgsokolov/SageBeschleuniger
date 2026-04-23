@@ -1,0 +1,48 @@
+{
+  "name": "sagebeschleuniger",
+  "version": "0.1.0",
+  "description": "Windows desktop tool that lets you whip the Sage window to make it shake.",
+  "license": "MIT",
+  "main": "main.js",
+  "bin": {
+    "sagebeschleuniger": "bin/sagebeschleuniger.js"
+  },
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "electron",
+    "tray",
+    "overlay",
+    "windows",
+    "sage"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgsokolov/SageBeschleuniger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mgsokolov/SageBeschleuniger/issues"
+  },
+  "homepage": "https://github.com/mgsokolov/SageBeschleuniger#readme",
+  "files": [
+    "main.js",
+    "preload.js",
+    "overlay.html",
+    "src",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "electron": "^33.0.0",
+    "koffi": "^2.9.0"
+  }
+}
